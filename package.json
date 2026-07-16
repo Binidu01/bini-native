@@ -1,6 +1,6 @@
 {
   "name": "bini-native",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Automatic Tauri native feature detection and wiring",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -27,12 +27,14 @@
     "vite": "^6.0.0 || ^7.0.0 || ^8.0.0"
   },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^26.1.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vite": "^8.1.4"
   },
   "dependencies": {
+    "cross-spawn": "^7.0.6",
     "oxc-parser": "^0.140.0"
   },
   "keywords": [

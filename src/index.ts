@@ -2,8 +2,17 @@ import type { Plugin } from 'vite';
 import { parseSync } from 'oxc-parser';
 import { readFile, writeFile, readdir } from 'fs/promises';
 import { existsSync, readFileSync, readdirSync } from 'fs';
-import { execSync, spawn } from 'child_process';
+import crossSpawn from 'cross-spawn';
 import path from 'path';
+
+// We deliberately do not use child_process's `shell: true` option anywhere in
+// this file. As of Node 22+, passing an args array together with
+// `shell: true` is deprecated (DEP0190) precisely because Node does NOT
+// escape the array entries in that mode — it just joins them into a single
+// string for the shell to reparse, which reopens the same injection surface
+// as a hand-built command string. `cross-spawn` resolves Windows .cmd/.bat
+// shims and quotes arguments itself without handing a joined string to
+// cmd.exe, so we get correct Windows behavior without shell:true.
 
 const colors = {
   reset: "\x1b[0m", bold: "\x1b[1m", cyan: "\x1b[36m",
@@ -360,14 +369,18 @@ let cachedPackageManager: PackageManager | null = null;
 
 function detectPackageManager(cwd: string): PackageManager {
   if (cachedPackageManager) return cachedPackageManager;
-  const candidates: { name: PackageManager; command: string }[] = [
-    { name: 'bun', command: 'bun --version' }, 
-    { name: 'pnpm', command: 'pnpm --version' },
-    { name: 'yarn', command: 'yarn --version' }, 
-    { name: 'npm', command: 'npm --version' },
+  const candidates: { name: PackageManager; bin: string; args: string[] }[] = [
+    { name: 'bun', bin: 'bun', args: ['--version'] },
+    { name: 'pnpm', bin: 'pnpm', args: ['--version'] },
+    { name: 'yarn', bin: 'yarn', args: ['--version'] },
+    { name: 'npm', bin: 'npm', args: ['--version'] },
   ];
   for (const c of candidates) {
-    try { execSync(c.command, { stdio: 'ignore', cwd }); cachedPackageManager = c.name; return c.name; } catch { continue; }
+    const result = crossSpawn.sync(c.bin, c.args, { stdio: 'ignore', cwd, windowsHide: true });
+    if (!result.error && result.status === 0) {
+      cachedPackageManager = c.name;
+      return c.name;
+    }
   }
   cachedPackageManager = 'npm';
   return 'npm';
@@ -388,7 +401,13 @@ async function installPackages(cwd: string, packages: string[]): Promise<void> {
   const pm = detectPackageManager(cwd);
 
   await new Promise<void>((resolve) => {
-    const child = spawn(pm, ['add', ...valid], { cwd, stdio: 'ignore', shell: process.platform === 'win32' });
+    // cross-spawn resolves the correct .cmd/.bat shim on Windows and quotes
+    // arguments itself — no shell:true, so no unescaped concatenation.
+    const child = crossSpawn(pm, ['add', ...valid], {
+      cwd,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
     const timer = setTimeout(() => child.kill(), 120_000);
     const done = () => { clearTimeout(timer); resolve(); };
 
@@ -409,14 +428,20 @@ function installPackagesSync(cwd: string, packages: string[]): void {
   if (valid.length === 0) return;
 
   const pm = detectPackageManager(cwd);
-  
+
   try {
     log.info(`Installing: ${valid.join(', ')}`);
-    execSync(`${pm} add ${valid.join(' ')}`, { 
+    // cross-spawn.sync resolves the .cmd/.bat shim and quotes arguments
+    // itself, so shell:true (and its DEP0190 unescaped-concatenation
+    // behavior) is never needed here, on Windows or elsewhere.
+    const result = crossSpawn.sync(pm, ['add', ...valid], {
       stdio: 'inherit',
       cwd,
-      timeout: 120000
+      timeout: 120000,
+      windowsHide: true,
     });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`exited with code ${result.status}`);
     log.success(`Successfully installed: ${valid.join(', ')}`);
   } catch (err) {
     log.warn(`Could not auto-install ${valid.join(', ')}. Run manually: ${pm} add ${valid.join(' ')}`);
@@ -496,11 +521,23 @@ function getRustPlugins(features: FeatureDefinition[]): RustPluginSpec[] {
   return result;
 }
 
+// Defense-in-depth: every patch* function below writes only to paths derived
+// from a fixed `tauriDir`/`projectPath` root via static path.join segments,
+// but this guard protects against any future refactor that threads in a
+// dynamic segment, by refusing to write outside the intended root.
+function assertPathInside(root: string, target: string): void {
+  const relative = path.relative(root, target);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to write outside of project root: ${target}`);
+  }
+}
+
 const DESKTOP_TARGET_HEADER = '[target."cfg(not(any(target_os = "android", target_os = "ios")))".dependencies]';
 const DESKTOP_TARGET_HEADER_RE = /\[target\."cfg\(not\(any\(target_os = "android", target_os = "ios"\)\)\)"\.dependencies\]/;
 
 async function patchCargoToml(tauriDir: string, features: FeatureDefinition[]): Promise<void> {
   const cargoPath = path.join(tauriDir, 'Cargo.toml');
+  assertPathInside(tauriDir, cargoPath);
   if (!existsSync(cargoPath)) return;
   
   const plugins = getRustPlugins(features);
@@ -562,6 +599,7 @@ async function patchLibRs(tauriDir: string, features: FeatureDefinition[]): Prom
     path.join(tauriDir, 'src', 'lib.rs'),
     path.join(tauriDir, 'src', 'main.rs'),
   ];
+  candidates.forEach((p) => assertPathInside(tauriDir, p));
   
   const targetPath = candidates.find((p) => existsSync(p));
   if (!targetPath) {
@@ -687,6 +725,7 @@ async function patchDesktopOnlyPlugins(targetPath: string, plugins: RustPluginSp
 
 async function patchCapabilities(tauriDir: string, features: FeatureDefinition[]): Promise<void> {
   const capsPath = path.join(tauriDir, 'capabilities', 'default.json');
+  assertPathInside(tauriDir, capsPath);
   if (!existsSync(capsPath)) return;
 
   const required = ['core:default'];
@@ -715,6 +754,7 @@ async function patchCapabilities(tauriDir: string, features: FeatureDefinition[]
 
 async function patchAndroidManifest(tauriDir: string, features: FeatureDefinition[]): Promise<void> {
   const manifestPath = path.join(tauriDir, 'gen', 'android', 'app', 'src', 'main', 'AndroidManifest.xml');
+  assertPathInside(tauriDir, manifestPath);
   const permissions = features.flatMap((f) => f.androidPermissions ?? []);
   if (permissions.length === 0 || !existsSync(manifestPath)) return;
 
@@ -752,8 +792,12 @@ async function patchPlist(plistPath: string, descriptions: Record<string, string
 async function patchIosAndMacosPlists(tauriDir: string, features: FeatureDefinition[]): Promise<void> {
   const ios = features.reduce((acc, f) => ({ ...acc, ...(f.iosUsageDescriptions ?? {}) }), {} as Record<string, string>);
   const macos = features.reduce((acc, f) => ({ ...acc, ...(f.macosUsageDescriptions ?? {}) }), {} as Record<string, string>);
-  await patchPlist(path.join(tauriDir, 'gen', 'apple', 'Sources', 'Info.plist'), ios);
-  await patchPlist(path.join(tauriDir, 'Info.plist'), macos);
+  const iosPath = path.join(tauriDir, 'gen', 'apple', 'Sources', 'Info.plist');
+  const macosPath = path.join(tauriDir, 'Info.plist');
+  assertPathInside(tauriDir, iosPath);
+  assertPathInside(tauriDir, macosPath);
+  await patchPlist(iosPath, ios);
+  await patchPlist(macosPath, macos);
 }
 
 const SCANNABLE_EXT = new Set(['.ts', '.tsx', '.js', '.jsx']);

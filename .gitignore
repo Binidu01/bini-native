@@ -46,3 +46,4 @@ coverage/
 *.tgz
 *.tar.gz
 *.zip
+pnpm-lock.yaml

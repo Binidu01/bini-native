@@ -105,6 +105,17 @@ A couple of things are Tauri/OS limitations, not bugs in this plugin:
 - A `src/main.tsx` / `main.jsx` / `main.ts` / `main.js` entry file, where runtime polyfills get injected
 - Vite 8
 
+## Security
+
+`bini-native` runs at build time and touches your package manager and your `src-tauri/` files directly, so it's worth being explicit about how it does that:
+
+- **No shell string interpolation, and no `shell: true`.** Package installs (`npm add`, `pnpm add`, etc.) go through [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) instead of Node's built-in `child_process` with `shell: true`. This distinction matters: Node's own `shell: true` option does **not** escape an args array — it concatenates the entries into a single string and hands that to the shell to reparse, which is exactly the injection surface a naive `execSync` string would have (this is also why Node emits deprecation warning `DEP0190` when you combine `shell: true` with an args array). `cross-spawn` avoids that entirely by resolving Windows `.cmd`/`.bat` shims and quoting arguments itself, without ever asking a shell to reparse a joined string.
+- **Package names are allowlisted.** Every package name `bini-native` might install is checked against a strict pattern (`^(@scope/)?name` with only alphanumerics, `.`, `_`, `-`) before it's ever passed to the package manager. Anything that doesn't match is skipped with a warning instead of being installed.
+- **Writes are contained to your project.** Every file `bini-native` patches (`Cargo.toml`, `lib.rs`/`main.rs`, `capabilities/default.json`, `AndroidManifest.xml`, `Info.plist`) is resolved from a fixed `src-tauri/` root via static path joins, with a guard that refuses to write anywhere outside that root.
+- **Dependency footprint is intentionally small.** There are two runtime dependencies: [`oxc-parser`](https://www.npmjs.com/package/oxc-parser) (MIT, used for the AST import scan that detects `@tauri-apps/plugin-*` usage) and [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) (MIT, used for the safe cross-platform process spawning described above). `oxc-parser` ships native NAPI bindings per platform, which is why you'll see "native code" flagged by supply-chain scanners — that's expected for a Rust-backed parser and not something a pure-JS package can avoid while staying fast. `cross-spawn` is pure JS with no native code. `vite` is a peer dependency, not bundled. `typescript`, `tsup`, and everything else live in `devDependencies` and are never published — you can confirm this yourself with `npm pack --dry-run` or `pnpm pack --dry-run`, which lists exactly what ships in the tarball.
+
+If your org runs supply-chain scanning as part of CI, point it at the packed tarball rather than the full repo/lockfile where possible — scanning `devDependencies` will surface findings (license, minification, etc.) that never reach anyone who installs `bini-native`.
+
 ## FAQ
 
 **Does this touch my code every time I save?**
@@ -125,4 +136,4 @@ Issues and PRs welcome. Please include your OS, Tauri version, and (if relevant)
 
 ## License
 
-MIT © [Bini](https://github.com/rbini)
+MIT © [Bini.js](https://bini.js.org)
