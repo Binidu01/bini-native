@@ -1,0 +1,47 @@
+{
+  "name": "bini-native",
+  "version": "1.0.1",
+  "description": "Automatic Tauri native feature detection and wiring",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+   "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "prepublishOnly": "pnpm build"
+  },
+  "peerDependencies": {
+    "vite": "^6.0.0 || ^7.0.0 || ^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.4"
+  },
+  "dependencies": {
+    "oxc-parser": "^0.140.0"
+  },
+  "keywords": [
+    "tauri",
+    "bini",
+    "native",
+    "vite",
+    "plugin",
+    "automation"
+  ],
+  "license": "MIT"
+}
