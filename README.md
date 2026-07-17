@@ -43,16 +43,20 @@ export default defineConfig({
 });
 ```
 
-That's it. Run `tauri dev` or `tauri build` as usual.
+That's it. Run `tauri dev` as usual — see [How it works](#how-it-works) for what that does and doesn't do during `tauri build`.
 
 ## How it works
 
-`bini-native` runs in two passes, both timed to happen **before** cargo ever touches your Rust code — so there's no race between the plugin and the Tauri CLI:
+**Wiring only ever happens during `tauri dev`.** `tauri build` is a deliberate no-op: `bini-native` is registered with Vite's `apply: 'serve'`, so none of its hooks — detection, package installs, `Cargo.toml`/`lib.rs` patching, capability/manifest/plist edits, polyfill injection — run during a production build. `vite build` behaves exactly as if the plugin weren't installed at all.
 
-| Mode | When wiring runs | Why it's safe |
-|---|---|---|
-| `tauri dev` | Before the Vite dev server's port opens | Tauri's CLI waits for that port before starting `cargo build`, so wiring always finishes first |
-| `tauri build` | At Vite's `buildStart` | `tauri build` runs `vite build` to completion before invoking cargo at all |
+| Mode | What happens |
+|---|---|
+| `tauri dev` | Detection + wiring runs twice: once synchronously at module load, before Vite's dev server port opens (Tauri's CLI waits for that port before starting `cargo build`, so wiring always finishes first), then again on Vite's `buildStart` as a safety net |
+| `tauri build` | Nothing. No detection, no installs, no file writes |
+
+This is safe because the wiring is **persistent, not build-time**: everything `bini-native` writes — `Cargo.toml` entries, `lib.rs` plugin registrations, `capabilities/default.json` permissions, `AndroidManifest.xml`, `Info.plist` — lands as ordinary files inside `src-tauri/`. Those are the same files cargo and the platform build tooling read no matter which command last touched them. Run `tauri dev` once, and the wiring is on disk; every later `tauri build` just compiles against what's already there, the same as if you'd hand-edited those files yourself.
+
+**Practical implication:** run `tauri dev` at least once — and again after adding a new native API — before your first `tauri build`. On a completely fresh checkout where `tauri dev` has never run, `src-tauri/` hasn't been wired yet and `tauri build` won't wire it for you.
 
 There's no "always wired regardless of use" tier. Every plugin — including the everyday ones like dialog and clipboard — is wired only if your source actually uses it, via a combined regex + AST import scan:
 
@@ -104,14 +108,25 @@ A couple of things are Tauri/OS limitations, not bugs in this plugin:
 - A Tauri v2 project (`src-tauri/` present) — on projects without one, `bini-native` no-ops entirely, so it's safe to include in web-only builds too
 - A `src/main.tsx` / `main.jsx` / `main.ts` / `main.js` entry file, where runtime polyfills get injected
 - Vite 8
+- `tauri dev` run at least once before `tauri build` on a fresh checkout (see [How it works](#how-it-works))
+
+## CI / production builds
+
+Because wiring is dev-only and persistent, a CI pipeline that only ever runs `tauri build` on a fresh checkout — never `tauri dev` — will build against whatever's already committed in `src-tauri/`, unwired for anything not already there. Two common ways to handle this:
+
+- **Commit `src-tauri/` after wiring locally.** Run `tauri dev` once on your machine, confirm the plugin's edits look right, then commit `Cargo.toml`, `lib.rs`, `capabilities/default.json`, and any manifest/plist changes like any other source file. CI's `tauri build` then just compiles them — no special CI step needed.
+- **Run a short-lived `tauri dev` in CI first**, then kill it once wiring finishes, before invoking `tauri build`. Slower, but useful if you don't want generated Tauri files in version control.
+
+Either way, `bini-native` never runs code during the build step itself — build is always just cargo compiling whatever's on disk.
 
 ## Security
 
-`bini-native` runs at build time and touches your package manager and your `src-tauri/` files directly, so it's worth being explicit about how it does that:
+`bini-native` runs during `tauri dev` and touches your package manager and your `src-tauri/` files directly, so it's worth being explicit about how it does that:
 
 - **No shell string interpolation, and no `shell: true`.** Package installs (`npm add`, `pnpm add`, etc.) go through [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) instead of Node's built-in `child_process` with `shell: true`. This distinction matters: Node's own `shell: true` option does **not** escape an args array — it concatenates the entries into a single string and hands that to the shell to reparse, which is exactly the injection surface a naive `execSync` string would have (this is also why Node emits deprecation warning `DEP0190` when you combine `shell: true` with an args array). `cross-spawn` avoids that entirely by resolving Windows `.cmd`/`.bat` shims and quoting arguments itself, without ever asking a shell to reparse a joined string.
 - **Package names are allowlisted.** Every package name `bini-native` might install is checked against a strict pattern (`^(@scope/)?name` with only alphanumerics, `.`, `_`, `-`) before it's ever passed to the package manager. Anything that doesn't match is skipped with a warning instead of being installed.
 - **Writes are contained to your project.** Every file `bini-native` patches (`Cargo.toml`, `lib.rs`/`main.rs`, `capabilities/default.json`, `AndroidManifest.xml`, `Info.plist`) is resolved from a fixed `src-tauri/` root via static path joins, with a guard that refuses to write anywhere outside that root.
+- **Build is a strictly smaller attack surface than dev.** Because `tauri build` doesn't run any of the plugin's code, none of the above — subprocess spawning, package installs, file patching — happens as part of a production build at all.
 - **Dependency footprint is intentionally small.** There are two runtime dependencies: [`oxc-parser`](https://www.npmjs.com/package/oxc-parser) (MIT, used for the AST import scan that detects `@tauri-apps/plugin-*` usage) and [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) (MIT, used for the safe cross-platform process spawning described above). `oxc-parser` ships native NAPI bindings per platform, which is why you'll see "native code" flagged by supply-chain scanners — that's expected for a Rust-backed parser and not something a pure-JS package can avoid while staying fast. `cross-spawn` is pure JS with no native code. `vite` is a peer dependency, not bundled. `typescript`, `tsup`, and everything else live in `devDependencies` and are never published — you can confirm this yourself with `npm pack --dry-run` or `pnpm pack --dry-run`, which lists exactly what ships in the tarball.
 
 If your org runs supply-chain scanning as part of CI, point it at the packed tarball rather than the full repo/lockfile where possible — scanning `devDependencies` will surface findings (license, minification, etc.) that never reach anyone who installs `bini-native`.
@@ -120,6 +135,9 @@ If your org runs supply-chain scanning as part of CI, point it at the packed tar
 
 **Does this touch my code every time I save?**
 No. File watching only triggers a cheap, read-only feature-detection scan (debounced) that logs a restart notice if something new shows up — it never rewrites `src-tauri/` mid-session.
+
+**Does `tauri build` re-check or re-wire anything?**
+No — `tauri build` is a complete no-op for `bini-native`. It only ever runs during `tauri dev`. See [How it works](#how-it-works) and [CI / production builds](#ci--production-builds).
 
 **What if I've already hand-edited `lib.rs`?**
 `bini-native` checks the actual registered `.plugin(...)` call for each crate. If it's already correct, it's left untouched. If it's missing, it's inserted. If it's present but wrong — wrong call form, or a desktop-only plugin chained where it shouldn't be — it's corrected in place rather than left broken.

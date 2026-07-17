@@ -47,3 +47,4 @@ coverage/
 *.tar.gz
 *.zip
 pnpm-lock.yaml
+pnpm-workspace.yaml

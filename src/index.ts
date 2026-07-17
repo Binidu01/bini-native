@@ -1064,12 +1064,16 @@ function checkForNewFeaturesOnChange(projectPath: string): void {
 
 // ============================================================
 // PRE-INSTALLATION - Runs synchronously at module load
-// This happens BEFORE Vite starts
+// This happens BEFORE Vite starts, and only for the dev/serve command.
+// vite.config (and therefore this module) is evaluated for `build` too,
+// but there's no Vite hook available yet at this point in module load, so
+// we check the CLI invocation directly and skip entirely for `build`.
 // ============================================================
+const isDevCommand = !process.argv.includes('build');
 const projectPath = process.cwd();
 const tauriDir = path.join(projectPath, 'src-tauri');
 
-if (existsSync(tauriDir)) {
+if (isDevCommand && existsSync(tauriDir)) {
   try {
     const detected = detectUsedFeaturesSync(projectPath);
     const npmPackages = detected
@@ -1094,6 +1098,10 @@ export function biniNative(): Plugin {
   return {
     name: 'bini-native',
     enforce: 'pre',
+    // Only run this plugin's hooks for `vite dev`/`tauri dev`. During a
+    // `build`, Vite skips every hook below entirely — no install, no
+    // Cargo.toml/lib.rs/capabilities patching, no polyfill injection.
+    apply: 'serve',
 
     async buildStart() {
       if (wired) return;
