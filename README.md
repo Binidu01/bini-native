@@ -76,6 +76,15 @@ One thing stays unconditional regardless of what's detected: Tauri's core capabi
 
 If you add a new API mid-session, `bini-native` detects it and prints a one-line notice to restart `tauri dev` — it deliberately does **not** rewrite `src-tauri/` files while cargo might be running, to avoid write races.
 
+## Package installs
+
+When wiring pulls in an npm package (e.g. `@tauri-apps/plugin-dialog`), `bini-native` handles that in two steps rather than blindly shelling out to `add` every time:
+
+1. **Skip anything already installed.** Before touching your package manager at all, each package is checked against `node_modules/<name>/package.json` on disk. If it's already there, it's left alone — no re-install, no version pin change, no extra work on every `tauri dev` restart. Only genuinely missing packages get passed to the install command.
+2. **Detect your package manager from your lock file, not by guessing.** `bini-native` looks for `bun.lockb`, `bun.lock`, `pnpm-lock.yaml`, `yarn.lock`, or `package-lock.json` (in that order) and uses whichever one it finds — matching the tool you're actually using instead of picking whichever CLI happens to be first on `PATH`. Only on a brand-new project with no lock file yet does it fall back to probing `bun` → `pnpm` → `yarn` → `npm` on `PATH`, defaulting to `npm` if none respond.
+
+Installs run through [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) (see [Security](#security)), and — same as adding a new native API mid-session — a fresh install always prints a restart notice rather than trying to hot-reload the new dependency into a running Vite session. Module resolution for a brand-new package needs Vite's dependency optimizer to see it before the first request, which a running dev server can't safely do for you; restarting `tauri dev` is the deliberate, predictable path instead of a fragile in-place reload.
+
 ## Supported plugins
 
 | Feature | Web API you write | Rust crate | Platform |
@@ -124,6 +133,8 @@ Either way, `bini-native` never runs code during the build step itself — build
 `bini-native` runs during `tauri dev` and touches your package manager and your `src-tauri/` files directly, so it's worth being explicit about how it does that:
 
 - **No shell string interpolation, and no `shell: true`.** Package installs (`npm add`, `pnpm add`, etc.) go through [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) instead of Node's built-in `child_process` with `shell: true`. This distinction matters: Node's own `shell: true` option does **not** escape an args array — it concatenates the entries into a single string and hands that to the shell to reparse, which is exactly the injection surface a naive `execSync` string would have (this is also why Node emits deprecation warning `DEP0190` when you combine `shell: true` with an args array). `cross-spawn` avoids that entirely by resolving Windows `.cmd`/`.bat` shims and quoting arguments itself, without ever asking a shell to reparse a joined string.
+- **Package manager choice comes from your lock file, not a guess.** `bini-native` reads `bun.lockb`/`bun.lock`/`pnpm-lock.yaml`/`yarn.lock`/`package-lock.json` to pick the install command, only probing `PATH` as a fallback on a lock-file-less fresh project. See [Package installs](#package-installs).
+- **Nothing gets reinstalled that's already there.** Every package is checked against `node_modules/<name>/package.json` before it's ever passed to an `add` command, so re-running `tauri dev` doesn't repeatedly shell out for dependencies you already have.
 - **Package names are allowlisted.** Every package name `bini-native` might install is checked against a strict pattern (`^(@scope/)?name` with only alphanumerics, `.`, `_`, `-`) before it's ever passed to the package manager. Anything that doesn't match is skipped with a warning instead of being installed.
 - **Writes are contained to your project.** Every file `bini-native` patches (`Cargo.toml`, `lib.rs`/`main.rs`, `capabilities/default.json`, `AndroidManifest.xml`, `Info.plist`) is resolved from a fixed `src-tauri/` root via static path joins, with a guard that refuses to write anywhere outside that root.
 - **Build is a strictly smaller attack surface than dev.** Because `tauri build` doesn't run any of the plugin's code, none of the above — subprocess spawning, package installs, file patching — happens as part of a production build at all.
@@ -138,6 +149,9 @@ No. File watching only triggers a cheap, read-only feature-detection scan (debou
 
 **Does `tauri build` re-check or re-wire anything?**
 No — `tauri build` is a complete no-op for `bini-native`. It only ever runs during `tauri dev`. See [How it works](#how-it-works) and [CI / production builds](#ci--production-builds).
+
+**Will it try to reinstall packages every time I run `tauri dev`?**
+No. Every package is checked against `node_modules` first, and only genuinely missing ones are installed. See [Package installs](#package-installs).
 
 **What if I've already hand-edited `lib.rs`?**
 `bini-native` checks the actual registered `.plugin(...)` call for each crate. If it's already correct, it's left untouched. If it's missing, it's inserted. If it's present but wrong — wrong call form, or a desktop-only plugin chained where it shouldn't be — it's corrected in place rather than left broken.
