@@ -5,15 +5,6 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import crossSpawn from 'cross-spawn';
 import path from 'path';
 
-// We deliberately do not use child_process's `shell: true` option anywhere in
-// this file. As of Node 22+, passing an args array together with
-// `shell: true` is deprecated (DEP0190) precisely because Node does NOT
-// escape the array entries in that mode — it just joins them into a single
-// string for the shell to reparse, which reopens the same injection surface
-// as a hand-built command string. `cross-spawn` resolves Windows .cmd/.bat
-// shims and quotes arguments itself without handing a joined string to
-// cmd.exe, so we get correct Windows behavior without shell:true.
-
 const colors = {
   reset: "\x1b[0m", bold: "\x1b[1m", cyan: "\x1b[36m",
   green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m",
@@ -51,24 +42,24 @@ interface FeatureDefinition {
 }
 
 const CORE_FEATURES: FeatureDefinition[] = [
-  { 
-    id: 'opener', 
+  {
+    id: 'opener',
     label: 'Opener',
     detectPatterns: [/@tauri-apps\/plugin-opener/, /openUrl/],
-    rustPlugin: { 
-      crate: 'tauri-plugin-opener', 
-      rustIdent: 'tauri_plugin_opener', 
-      permissions: ['opener:default'] 
+    rustPlugin: {
+      crate: 'tauri-plugin-opener',
+      rustIdent: 'tauri_plugin_opener',
+      permissions: ['opener:default']
     },
-    npmPackage: '@tauri-apps/plugin-opener' 
+    npmPackage: '@tauri-apps/plugin-opener'
   },
-  { 
-    id: 'dialog', 
+  {
+    id: 'dialog',
     label: 'Dialog',
-    rustPlugin: { 
-      crate: 'tauri-plugin-dialog', 
-      rustIdent: 'tauri_plugin_dialog', 
-      permissions: ['dialog:default'] 
+    rustPlugin: {
+      crate: 'tauri-plugin-dialog',
+      rustIdent: 'tauri_plugin_dialog',
+      permissions: ['dialog:default']
     },
     npmPackage: '@tauri-apps/plugin-dialog',
     detectPatterns: [/\bshowOpenFilePicker\s*\(/, /\bshowSaveFilePicker\s*\(/],
@@ -115,23 +106,23 @@ const CORE_FEATURES: FeatureDefinition[] = [
     }
   }
 ` },
-  { 
-    id: 'fs', 
+  {
+    id: 'fs',
     label: 'File System',
-    rustPlugin: { 
-      crate: 'tauri-plugin-fs', 
-      rustIdent: 'tauri_plugin_fs', 
-      permissions: ['fs:default'] 
+    rustPlugin: {
+      crate: 'tauri-plugin-fs',
+      rustIdent: 'tauri_plugin_fs',
+      permissions: ['fs:default']
     },
-    npmPackage: '@tauri-apps/plugin-fs' 
+    npmPackage: '@tauri-apps/plugin-fs'
   },
-  { 
-    id: 'clipboard', 
+  {
+    id: 'clipboard',
     label: 'Clipboard',
-    rustPlugin: { 
-      crate: 'tauri-plugin-clipboard-manager', 
-      rustIdent: 'tauri_plugin_clipboard_manager', 
-      permissions: ['clipboard-manager:allow-read-text', 'clipboard-manager:allow-write-text'] 
+    rustPlugin: {
+      crate: 'tauri-plugin-clipboard-manager',
+      rustIdent: 'tauri_plugin_clipboard_manager',
+      permissions: ['clipboard-manager:allow-read-text', 'clipboard-manager:allow-write-text']
     },
     npmPackage: '@tauri-apps/plugin-clipboard-manager',
     detectPatterns: [/navigator\.clipboard\.(writeText|readText)/],
@@ -149,13 +140,13 @@ const CORE_FEATURES: FeatureDefinition[] = [
     }
   }
 ` },
-  { 
-    id: 'notification', 
+  {
+    id: 'notification',
     label: 'Notification',
-    rustPlugin: { 
-      crate: 'tauri-plugin-notification', 
-      rustIdent: 'tauri_plugin_notification', 
-      permissions: ['notification:default'] 
+    rustPlugin: {
+      crate: 'tauri-plugin-notification',
+      rustIdent: 'tauri_plugin_notification',
+      permissions: ['notification:default']
     },
     npmPackage: '@tauri-apps/plugin-notification',
     detectPatterns: [/new\s+Notification\s*\(/],
@@ -188,30 +179,30 @@ const CORE_FEATURES: FeatureDefinition[] = [
     window.Notification = BiniNotification${useTs ? ' as any' : ''};
   }
 ` },
-  { 
-    id: 'os', 
+  {
+    id: 'os',
     label: 'OS Info',
-    rustPlugin: { 
-      crate: 'tauri-plugin-os', 
-      rustIdent: 'tauri_plugin_os', 
-      permissions: ['os:default'] 
+    rustPlugin: {
+      crate: 'tauri-plugin-os',
+      rustIdent: 'tauri_plugin_os',
+      permissions: ['os:default']
     },
-    npmPackage: '@tauri-apps/plugin-os' 
+    npmPackage: '@tauri-apps/plugin-os'
   },
 ];
 
 const OPTIONAL_FEATURES: FeatureDefinition[] = [
-  { 
-    id: 'geolocation', 
+  {
+    id: 'geolocation',
     label: 'Geolocation',
     rustPlugin: {
-      crate: 'tauri-plugin-geolocation', 
+      crate: 'tauri-plugin-geolocation',
       rustIdent: 'tauri_plugin_geolocation',
       permissions: [
-        'geolocation:allow-check-permissions', 
+        'geolocation:allow-check-permissions',
         'geolocation:allow-request-permissions',
-        'geolocation:allow-get-current-position', 
-        'geolocation:allow-watch-position', 
+        'geolocation:allow-get-current-position',
+        'geolocation:allow-watch-position',
         'geolocation:allow-clear-watch',
       ],
     },
@@ -221,10 +212,10 @@ const OPTIONAL_FEATURES: FeatureDefinition[] = [
     iosUsageDescriptions: { NSLocationWhenInUseUsageDescription: 'This app uses your location to provide relevant features.' },
     macosUsageDescriptions: { NSLocationUsageDescription: 'This app uses your location to provide relevant features.' },
     polyfillImports: [
-      'checkPermissions as biniGeoCheckPermissions', 
+      'checkPermissions as biniGeoCheckPermissions',
       'requestPermissions as biniGeoRequestPermissions',
-      'getCurrentPosition as biniGeoGetCurrentPosition', 
-      'watchPosition as biniGeoWatchPosition', 
+      'getCurrentPosition as biniGeoGetCurrentPosition',
+      'watchPosition as biniGeoWatchPosition',
       'clearWatch as biniGeoClearWatch',
     ],
     polyfillBody: (useTs) => `
@@ -256,11 +247,11 @@ const OPTIONAL_FEATURES: FeatureDefinition[] = [
     }
   }
 ` },
-  { 
-    id: 'global-shortcut', 
+  {
+    id: 'global-shortcut',
     label: 'Global Shortcut',
     rustPlugin: {
-      crate: 'tauri-plugin-global-shortcut', 
+      crate: 'tauri-plugin-global-shortcut',
       rustIdent: 'tauri_plugin_global_shortcut',
       permissions: ['global-shortcut:allow-register', 'global-shortcut:allow-unregister', 'global-shortcut:allow-is-registered'],
       initExpr: 'tauri_plugin_global_shortcut::Builder::new().build()',
@@ -284,11 +275,11 @@ const OPTIONAL_FEATURES: FeatureDefinition[] = [
     };
   }
 ` },
-  { 
-    id: 'autostart', 
+  {
+    id: 'autostart',
     label: 'Autostart',
     rustPlugin: {
-      crate: 'tauri-plugin-autostart', 
+      crate: 'tauri-plugin-autostart',
       rustIdent: 'tauri_plugin_autostart',
       permissions: ['autostart:allow-enable', 'autostart:allow-disable', 'autostart:allow-is-enabled'],
       initExpr: 'tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None)',
@@ -309,11 +300,11 @@ const OPTIONAL_FEATURES: FeatureDefinition[] = [
     };
   }
 ` },
-  { 
-    id: 'store', 
+  {
+    id: 'store',
     label: 'Persistent Store',
     rustPlugin: {
-      crate: 'tauri-plugin-store', 
+      crate: 'tauri-plugin-store',
       rustIdent: 'tauri_plugin_store',
       permissions: ['store:default'],
       initExpr: 'tauri_plugin_store::Builder::default().build()',
@@ -339,23 +330,23 @@ const OPTIONAL_FEATURES: FeatureDefinition[] = [
 const ALL_FEATURES: FeatureDefinition[] = [...CORE_FEATURES, ...OPTIONAL_FEATURES];
 
 const MANIFEST_ONLY_FEATURES: FeatureDefinition[] = [
-  { 
-    id: 'camera', 
+  {
+    id: 'camera',
     label: 'Camera',
     detectPatterns: [/getUserMedia\s*\(\s*\{[^}]*video/s],
     androidPermissions: ['<uses-permission android:name="android.permission.CAMERA"/>'],
     iosUsageDescriptions: { NSCameraUsageDescription: 'This app uses the camera to capture photos and video.' },
     macosUsageDescriptions: { NSCameraUsageDescription: 'This app uses the camera to capture photos and video.' },
-    noWiringNeeded: true 
+    noWiringNeeded: true
   },
-  { 
-    id: 'microphone', 
+  {
+    id: 'microphone',
     label: 'Microphone',
     detectPatterns: [/getUserMedia\s*\(\s*\{[^}]*audio/s, /new\s+MediaRecorder/],
     androidPermissions: ['<uses-permission android:name="android.permission.RECORD_AUDIO"/>'],
     iosUsageDescriptions: { NSMicrophoneUsageDescription: 'This app uses the microphone to record audio.' },
     macosUsageDescriptions: { NSMicrophoneUsageDescription: 'This app uses the microphone to record audio.' },
-    noWiringNeeded: true 
+    noWiringNeeded: true
   },
 ];
 
@@ -367,8 +358,45 @@ type PackageManager = 'bun' | 'pnpm' | 'yarn' | 'npm';
 
 let cachedPackageManager: PackageManager | null = null;
 
+const LOCK_FILES: { file: string; pm: PackageManager }[] = [
+  { file: 'bun.lockb', pm: 'bun' },
+  { file: 'bun.lock', pm: 'bun' },
+  { file: 'pnpm-lock.yaml', pm: 'pnpm' },
+  { file: 'yarn.lock', pm: 'yarn' },
+  { file: 'package-lock.json', pm: 'npm' },
+];
+
+const MAX_WORKSPACE_WALK = 5;
+
+/**
+ * Looks for a lock file starting at `startDir` and walking up toward a
+ * monorepo root. Stops once a parent no longer looks like part of the same
+ * project (no package.json), so it won't wander into an unrelated ancestor
+ * directory that happens to contain some other lock file.
+ */
+function findLockFileUpwards(startDir: string): PackageManager | null {
+  let dir = startDir;
+  for (let i = 0; i < MAX_WORKSPACE_WALK; i++) {
+    for (const { file, pm } of LOCK_FILES) {
+      if (existsSync(path.join(dir, file))) return pm;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // filesystem root
+    if (!existsSync(path.join(parent, 'package.json'))) break;
+    dir = parent;
+  }
+  return null;
+}
+
 function detectPackageManager(cwd: string): PackageManager {
   if (cachedPackageManager) return cachedPackageManager;
+
+  const fromLockFile = findLockFileUpwards(cwd);
+  if (fromLockFile) {
+    cachedPackageManager = fromLockFile;
+    return fromLockFile;
+  }
+
   const candidates: { name: PackageManager; bin: string; args: string[] }[] = [
     { name: 'bun', bin: 'bun', args: ['--version'] },
     { name: 'pnpm', bin: 'pnpm', args: ['--version'] },
@@ -390,6 +418,35 @@ function isValidPackageName(name: string): boolean {
   return /^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/i.test(name);
 }
 
+function isPackageInstalled(cwd: string, name: string): boolean {
+  try {
+    return existsSync(path.join(cwd, 'node_modules', name, 'package.json'));
+  } catch {
+    return false;
+  }
+}
+
+// Tracks package-manager child processes spawned by installPackages so they
+// can be killed if the dev process itself is terminated mid-install, instead
+// of being left as orphans.
+const activeInstalls = new Set<ReturnType<typeof crossSpawn>>();
+let installCleanupRegistered = false;
+
+function registerInstallCleanup(): void {
+  if (installCleanupRegistered) return;
+  installCleanupRegistered = true;
+
+  const killActiveInstalls = () => {
+    for (const child of activeInstalls) {
+      try { child.kill(); } catch {}
+    }
+  };
+
+  process.once('exit', killActiveInstalls);
+  process.once('SIGINT', () => { killActiveInstalls(); process.exit(130); });
+  process.once('SIGTERM', () => { killActiveInstalls(); process.exit(143); });
+}
+
 async function installPackages(cwd: string, packages: string[]): Promise<void> {
   if (packages.length === 0) return;
 
@@ -398,22 +455,30 @@ async function installPackages(cwd: string, packages: string[]): Promise<void> {
   if (invalid.length > 0) log.warn(`Refusing to install unexpected package name(s): ${invalid.join(', ')}`);
   if (valid.length === 0) return;
 
+  const toInstall = valid.filter((p) => !isPackageInstalled(cwd, p));
+  if (toInstall.length === 0) return;
+
   const pm = detectPackageManager(cwd);
+  registerInstallCleanup();
 
   await new Promise<void>((resolve) => {
-    // cross-spawn resolves the correct .cmd/.bat shim on Windows and quotes
-    // arguments itself — no shell:true, so no unescaped concatenation.
-    const child = crossSpawn(pm, ['add', ...valid], {
+    const child = crossSpawn(pm, ['add', ...toInstall], {
       cwd,
       stdio: 'ignore',
       windowsHide: true,
     });
+    activeInstalls.add(child);
+
     const timer = setTimeout(() => child.kill(), 120_000);
-    const done = () => { clearTimeout(timer); resolve(); };
+    const done = () => { clearTimeout(timer); activeInstalls.delete(child); resolve(); };
 
     child.on('error', done);
     child.on('exit', (code) => {
-      if (code !== 0) log.warn(`Could not auto-install ${valid.join(', ')}. Run manually: ${pm} add ${valid.join(' ')}`);
+      if (code !== 0) {
+        log.warn(`Could not auto-install ${toInstall.join(', ')}. Run manually: ${pm} add ${toInstall.join(' ')}`);
+      } else {
+        log.success(`Installed: ${toInstall.join(', ')}. Restart 'tauri dev' to pick it up.`);
+      }
       done();
     });
   });
@@ -427,14 +492,14 @@ function installPackagesSync(cwd: string, packages: string[]): void {
   if (invalid.length > 0) log.warn(`Refusing to install unexpected package name(s): ${invalid.join(', ')}`);
   if (valid.length === 0) return;
 
+  const toInstall = valid.filter((p) => !isPackageInstalled(cwd, p));
+  if (toInstall.length === 0) return;
+
   const pm = detectPackageManager(cwd);
 
   try {
-    log.info(`Installing: ${valid.join(', ')}`);
-    // cross-spawn.sync resolves the .cmd/.bat shim and quotes arguments
-    // itself, so shell:true (and its DEP0190 unescaped-concatenation
-    // behavior) is never needed here, on Windows or elsewhere.
-    const result = crossSpawn.sync(pm, ['add', ...valid], {
+    log.info(`Installing: ${toInstall.join(', ')}`);
+    const result = crossSpawn.sync(pm, ['add', ...toInstall], {
       stdio: 'inherit',
       cwd,
       timeout: 120000,
@@ -442,16 +507,16 @@ function installPackagesSync(cwd: string, packages: string[]): void {
     });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`exited with code ${result.status}`);
-    log.success(`Successfully installed: ${valid.join(', ')}`);
+    log.success(`Successfully installed: ${toInstall.join(', ')}`);
   } catch (err) {
-    log.warn(`Could not auto-install ${valid.join(', ')}. Run manually: ${pm} add ${valid.join(' ')}`);
+    log.warn(`Could not auto-install ${toInstall.join(', ')}. Run manually: ${pm} add ${toInstall.join(' ')}`);
   }
 }
 
 function detectUsedFeaturesSync(projectPath: string): FeatureDefinition[] {
   const srcDir = path.join(projectPath, 'src');
   if (!existsSync(srcDir)) return [];
-  
+
   const detectable = [...ALL_FEATURES, ...MANIFEST_ONLY_FEATURES, ...UNSUPPORTED_FEATURES];
   const matched = new Set<string>();
 
@@ -473,10 +538,10 @@ function detectUsedFeaturesSync(projectPath: string): FeatureDefinition[] {
   }
 
   const files = collectFilesSync(srcDir);
-  
+
   for (const file of files) {
     if (matched.size === detectable.length) break;
-    
+
     let content: string;
     try {
       content = readFileSync(file, 'utf-8');
@@ -521,10 +586,6 @@ function getRustPlugins(features: FeatureDefinition[]): RustPluginSpec[] {
   return result;
 }
 
-// Defense-in-depth: every patch* function below writes only to paths derived
-// from a fixed `tauriDir`/`projectPath` root via static path.join segments,
-// but this guard protects against any future refactor that threads in a
-// dynamic segment, by refusing to write outside the intended root.
 function assertPathInside(root: string, target: string): void {
   const relative = path.relative(root, target);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -539,7 +600,7 @@ async function patchCargoToml(tauriDir: string, features: FeatureDefinition[]): 
   const cargoPath = path.join(tauriDir, 'Cargo.toml');
   assertPathInside(tauriDir, cargoPath);
   if (!existsSync(cargoPath)) return;
-  
+
   const plugins = getRustPlugins(features);
   if (plugins.length === 0) return;
 
@@ -550,13 +611,11 @@ async function patchCargoToml(tauriDir: string, features: FeatureDefinition[]): 
     let content = await readFile(cargoPath, 'utf-8');
     let changed = false;
 
-    // Ensure [dependencies] section exists
     if (!content.includes('[dependencies]')) {
       content += '\n[dependencies]\n';
       changed = true;
     }
 
-    // Add cross-platform dependencies
     for (const { crate } of crossPlatform) {
       const depPattern = new RegExp(`^${crate}\\s*=`, 'm');
       if (!depPattern.test(content)) {
@@ -570,7 +629,6 @@ async function patchCargoToml(tauriDir: string, features: FeatureDefinition[]): 
       }
     }
 
-    // Handle desktop-only dependencies
     for (const { crate } of desktopOnly) {
       if (!new RegExp(`^${crate}\\s*=`, 'm').test(content)) {
         if (content.includes(DESKTOP_TARGET_HEADER)) {
@@ -600,7 +658,7 @@ async function patchLibRs(tauriDir: string, features: FeatureDefinition[]): Prom
     path.join(tauriDir, 'src', 'main.rs'),
   ];
   candidates.forEach((p) => assertPathInside(tauriDir, p));
-  
+
   const targetPath = candidates.find((p) => existsSync(p));
   if (!targetPath) {
     log.warn(`Could not find lib.rs or main.rs in ${path.join(tauriDir, 'src')}`);
@@ -616,24 +674,21 @@ async function patchLibRs(tauriDir: string, features: FeatureDefinition[]): Prom
     let content = await readFile(targetPath, 'utf-8');
     let changed = false;
 
-    // Find the tauri::Builder::default() line
     const builderMatch = content.match(/tauri::Builder::default\(\)/);
     if (!builderMatch) {
       log.warn(`Could not find tauri::Builder::default() in ${path.basename(targetPath)}`);
       return;
     }
 
-    // Add cross-platform plugins
     for (const plugin of crossPlatform) {
       const correctCall = `.plugin(${plugin.initExpr ?? `${plugin.rustIdent}::init()`})`;
-      
+
       if (!content.includes(plugin.rustIdent)) {
         log.info(`Adding ${plugin.crate} to ${path.basename(targetPath)}`);
-        
-        // Find insertion point
+
         const runMatch = content.match(/\.run\(tauri::generate_context!\(\)\)/);
         const setupMatch = content.match(/\.setup\(/);
-        
+
         let insertPos: number;
         if (runMatch) {
           insertPos = runMatch.index!;
@@ -644,7 +699,7 @@ async function patchLibRs(tauriDir: string, features: FeatureDefinition[]): Prom
           const endOfLine = content.indexOf('\n', builderEnd);
           insertPos = endOfLine + 1;
         }
-        
+
         content = content.slice(0, insertPos) + `    ${correctCall}\n` + content.slice(insertPos);
         changed = true;
       }
@@ -655,7 +710,6 @@ async function patchLibRs(tauriDir: string, features: FeatureDefinition[]): Prom
       log.success(`Updated ${path.basename(targetPath)}`);
     }
 
-    // Handle desktop-only plugins
     const desktopOnly = allPlugins.filter((p) => p.desktopOnly);
     if (desktopOnly.length > 0) {
       await patchDesktopOnlyPlugins(targetPath, desktopOnly);
@@ -843,7 +897,6 @@ async function detectUsedFeatures(projectPath: string): Promise<FeatureDefinitio
     if (matched.size === detectable.length) break;
     if (content === null) continue;
 
-    // Check detect patterns
     for (const f of detectable) {
       if (matched.has(f.id)) continue;
       if (f.detectPatterns?.some((p) => p.test(content))) {
@@ -851,7 +904,6 @@ async function detectUsedFeatures(projectPath: string): Promise<FeatureDefinitio
       }
     }
 
-    // Check npm packages
     for (const f of detectable) {
       if (matched.has(f.id)) continue;
       if (f.npmPackage && content.includes(f.npmPackage)) {
@@ -860,7 +912,6 @@ async function detectUsedFeatures(projectPath: string): Promise<FeatureDefinitio
       }
     }
 
-    // Parse imports
     try {
       const result = parseSync(content, { sourceType: 'module', sourceFilename: file } as any);
       const imports = collectTopLevelImports(result.program);
@@ -870,12 +921,9 @@ async function detectUsedFeatures(projectPath: string): Promise<FeatureDefinitio
           matched.add(f.id);
         }
       }
-    } catch {
-      // Already checked via content.includes above
-    }
+    } catch {}
   }
 
-  // Handle dependencies
   let expanded = true;
   while (expanded) {
     expanded = false;
@@ -1062,54 +1110,41 @@ function checkForNewFeaturesOnChange(projectPath: string): void {
   }, 400);
 }
 
-// ============================================================
-// PRE-INSTALLATION - Runs synchronously at module load
-// This happens BEFORE Vite starts, and only for the dev/serve command.
-// vite.config (and therefore this module) is evaluated for `build` too,
-// but there's no Vite hook available yet at this point in module load, so
-// we check the CLI invocation directly and skip entirely for `build`.
-// ============================================================
 const isDevCommand = !process.argv.includes('build');
-const projectPath = process.cwd();
-const tauriDir = path.join(projectPath, 'src-tauri');
+const preInstallProjectPath = process.cwd();
+const preInstallTauriDir = path.join(preInstallProjectPath, 'src-tauri');
 
-if (isDevCommand && existsSync(tauriDir)) {
+if (isDevCommand && existsSync(preInstallTauriDir)) {
   try {
-    const detected = detectUsedFeaturesSync(projectPath);
+    const detected = detectUsedFeaturesSync(preInstallProjectPath);
     const npmPackages = detected
       .filter(f => f.npmPackage)
       .map(f => f.npmPackage!)
       .filter((p, i, arr) => arr.indexOf(p) === i);
 
     if (npmPackages.length > 0) {
-      installPackagesSync(projectPath, npmPackages);
+      installPackagesSync(preInstallProjectPath, npmPackages);
     }
-  } catch (err) {
-    // Silently fail - async version will retry
+  } catch {
+    // Silently fail — async version will retry once the plugin's buildStart runs.
   }
 }
 
-// ============================================================
-// PLUGIN EXPORT
-// ============================================================
 export function biniNative(): Plugin {
   let wired = false;
 
   return {
     name: 'bini-native',
     enforce: 'pre',
-    // Only run this plugin's hooks for `vite dev`/`tauri dev`. During a
-    // `build`, Vite skips every hook below entirely — no install, no
-    // Cargo.toml/lib.rs/capabilities patching, no polyfill injection.
     apply: 'serve',
 
     async buildStart() {
       if (wired) return;
       wired = true;
-      
+
       const projectPath = process.cwd();
       const tauriDir = path.join(projectPath, 'src-tauri');
-      
+
       if (existsSync(tauriDir)) {
         await runFullWiring(projectPath, true);
       }
