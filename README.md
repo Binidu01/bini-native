@@ -3,7 +3,7 @@
 # bini-native
 
 **Automatic Tauri native wiring for Bini.js.**
-Import one Vite plugin. Never touch `src-tauri/` by hand again.
+Import one Vite plugin and stop hand-editing `src-tauri/` for common plugins.
 
 [![npm version](https://img.shields.io/npm/v/bini-native.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/bini-native)
 [![npm downloads](https://img.shields.io/npm/dm/bini-native.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/bini-native)
@@ -18,9 +18,16 @@ Import one Vite plugin. Never touch `src-tauri/` by hand again.
 
 ## What it does
 
-`bini-native` watches your frontend source, works out which native capabilities your app actually uses, and wires up the Tauri side automatically — Rust plugin registration, `Cargo.toml` dependencies, capability permissions, Android manifest entries, and iOS/macOS `Info.plist` usage descriptions. You import a Vite plugin once. That's the entire setup.
+`bini-native` scans your frontend source, works out which native capabilities your app uses, and wires up the Tauri side during `tauri dev`:
 
-No CLI commands to memorize. No manual `src-tauri/src/lib.rs` edits. No forgetting a permission and getting a silent, unexplained failure. Complexity stays invisible; you write normal web APIs (`navigator.geolocation`, `new Notification(...)`, `navigator.clipboard.writeText(...)`) and they work identically in the browser and inside the native shell.
+- installs the matching `@tauri-apps/plugin-*` npm packages,
+- adds the Rust plugin crates and registers them (via `cargo tauri add` for cross-platform plugins, and a managed block in `lib.rs` for desktop-only and mobile-only plugins),
+- scaffolds `desktop.json` / `mobile.json` capability files for platform-specific plugins,
+- injects runtime polyfills into your entry file, so standard web APIs (`navigator.clipboard.writeText`, `new Notification(...)`, `navigator.geolocation`, and so on) are routed to the native plugin when the app runs inside Tauri.
+
+In a normal browser the polyfill block does nothing, because it only runs when `__TAURI_INTERNALS__` exists on `window`.
+
+It does **not** edit `AndroidManifest.xml` or `Info.plist`, and it does not enable a `getUserMedia` camera or microphone setup. See [What it does not do](#what-it-does-not-do).
 
 ## Installation
 
@@ -43,128 +50,233 @@ export default defineConfig({
 });
 ```
 
-That's it. Run `tauri dev` as usual — see [How it works](#how-it-works) for what that does and doesn't do during `tauri build`.
+`biniNative()` takes no options. Source analysis is done through [`bini-router`](https://www.npmjs.com/package/bini-router) (`getSourceFacts`, `scanSourceFacts`, `isClientSourceFile`). `bini-router` `>= 2` and `vite` `^8.0.0` are **peer dependencies**, not bundled with `bini-native`. Bini.js projects already include both. npm 7+ installs missing peer dependencies automatically; pnpm and Yarn warn when one is missing.
+
+Then run `tauri dev` as usual.
 
 ## How it works
 
-**Wiring only ever happens during `tauri dev`.** `tauri build` is a deliberate no-op: `bini-native` is registered with Vite's `apply: 'serve'`, so none of its hooks — detection, package installs, `Cargo.toml`/`lib.rs` patching, capability/manifest/plist edits, polyfill injection — run during a production build. `vite build` behaves exactly as if the plugin weren't installed at all.
+The plugin is registered with `apply: 'serve'` and `enforce: 'pre'`, so its Vite hooks never run in `vite build`.
 
-| Mode | What happens |
-|---|---|
-| `tauri dev` | Detection + wiring runs twice: once synchronously at module load, before Vite's dev server port opens (Tauri's CLI waits for that port before starting `cargo build`, so wiring always finishes first), then again on Vite's `buildStart` as a safety net |
-| `tauri build` | Nothing. No detection, no installs, no file writes |
+| Stage | When | What happens |
+| --- | --- | --- |
+| Pre-install | When the plugin module loads, if `process.argv` does not contain `build` and `src-tauri/` exists | Scans your source, then synchronously installs any detected npm packages that are missing. Nothing else is touched at this point. |
+| Full wiring | Vite `buildStart` (once) | Reuses the scan, checks for the Tauri CLI, wires Rust plugins, scaffolds capability files, installs any still-missing npm packages, and rewrites the polyfill block in your entry file. |
+| File changes | Vite `handleHotUpdate` for client source files | A debounced (400 ms), read-only re-scan of the changed files. If a feature is newly detected, it logs a notice to restart `tauri dev`. Nothing is written. |
+| `tauri build` | Production build | The module-level pre-install is skipped by the `build` argument check, and no Vite hook runs. Nothing is detected, installed, or written. |
 
-This is safe because the wiring is **persistent, not build-time**: everything `bini-native` writes — `Cargo.toml` entries, `lib.rs` plugin registrations, `capabilities/default.json` permissions, `AndroidManifest.xml`, `Info.plist` — lands as ordinary files inside `src-tauri/`. Those are the same files cargo and the platform build tooling read no matter which command last touched them. Run `tauri dev` once, and the wiring is on disk; every later `tauri build` just compiles against what's already there, the same as if you'd hand-edited those files yourself.
+Because the wiring is written to ordinary files (`src-tauri/Cargo.toml`, `src-tauri/src/lib.rs`, capability files, `package.json`, your entry file), a later `tauri build` simply compiles what is already on disk.
 
-**Practical implication:** run `tauri dev` at least once — and again after adding a new native API — before your first `tauri build`. On a completely fresh checkout where `tauri dev` has never run, `src-tauri/` hasn't been wired yet and `tauri build` won't wire it for you.
+**Practical implication:** run `tauri dev` at least once, and again after adding a new native API, before your first `tauri build`. On a fresh checkout where `tauri dev` has never run, `tauri build` will not wire anything for you.
 
-There's no "always wired regardless of use" tier. Every plugin — including the everyday ones like dialog and clipboard — is wired only if your source actually uses it, via a combined regex + AST import scan:
+If you add a new native API mid-session, `bini-native` prints a one-line notice to restart `tauri dev`. It deliberately does not rewrite `src-tauri/` while cargo might be running. It only reports newly detected features, not removed ones.
 
-- `showOpenFilePicker(...)` / `showSaveFilePicker(...)` → dialog plugin (which pulls in the filesystem plugin automatically — see below)
-- `navigator.clipboard.writeText` / `readText` → clipboard plugin
-- `new Notification(...)` → notification plugin
-- `navigator.geolocation.*` → geolocation plugin + Android/iOS/macOS location permissions
-- `registerGlobalShortcut(...)` → global-shortcut plugin (desktop-only, see [Platform notes](#platform-notes))
-- `setAutoStart(...)` → autostart plugin (desktop-only, see [Platform notes](#platform-notes))
-- `window.biniStore.*` → persistent key-value store plugin
-- `getUserMedia({ video: true })` / `{ audio: true }` → camera/microphone platform permissions (no plugin needed — Tauri's webview supports these natively)
-- Any direct `import ... from '@tauri-apps/plugin-*'` → that plugin, even without a matching Web API call
+### Detection
 
-**One dependency link exists on purpose:** the dialog polyfill's synthetic file handle (`getFile()`, `createWritable()`) dynamically imports the filesystem plugin internally, even though your own code never touches it directly. So a project that only calls `showOpenFilePicker()` still gets the filesystem plugin wired — otherwise the picker would compile fine and then fail at runtime the first time someone tries to read the picked file.
+A feature is wired only if your source uses it. There is no always-on tier. Detection reads facts collected by `bini-router`: imports, calls, references, `new` expressions, and JSX attributes.
 
-One thing stays unconditional regardless of what's detected: Tauri's core capability (`core:default` — window operations, events, app metadata) is always ensured in `capabilities/default.json`, even on a project with zero plugin usage, since it's foundational to any Tauri app rather than tied to a specific plugin.
-
-If you add a new API mid-session, `bini-native` detects it and prints a one-line notice to restart `tauri dev` — it deliberately does **not** rewrite `src-tauri/` files while cargo might be running, to avoid write races.
-
-## Package installs
-
-When wiring pulls in an npm package (e.g. `@tauri-apps/plugin-dialog`), `bini-native` handles that in two steps rather than blindly shelling out to `add` every time:
-
-1. **Skip anything already installed.** Before touching your package manager at all, each package is checked against `node_modules/<name>/package.json` on disk. If it's already there, it's left alone — no re-install, no version pin change, no extra work on every `tauri dev` restart. Only genuinely missing packages get passed to the install command.
-2. **Detect your package manager from your lock file, not by guessing.** `bini-native` looks for `bun.lockb`, `bun.lock`, `pnpm-lock.yaml`, `yarn.lock`, or `package-lock.json` (in that order) and uses whichever one it finds — matching the tool you're actually using instead of picking whichever CLI happens to be first on `PATH`. Only on a brand-new project with no lock file yet does it fall back to probing `bun` → `pnpm` → `yarn` → `npm` on `PATH`, defaulting to `npm` if none respond.
-
-Installs run through [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) (see [Security](#security)), and — same as adding a new native API mid-session — a fresh install always prints a restart notice rather than trying to hot-reload the new dependency into a running Vite session. Module resolution for a brand-new package needs Vite's dependency optimizer to see it before the first request, which a running dev server can't safely do for you; restarting `tauri dev` is the deliberate, predictable path instead of a fragile in-place reload.
+- **Imports:** any import of `@tauri-apps/plugin-<name>` (or a subpath of it) detects that plugin, even with no matching web API call.
+- **Global names:** call, reference, and `new` checks match the bare name and the `window.`, `globalThis.`, and `self.` prefixed forms.
+- **Generic names:** a few plugins are detected from common function names (for example `exists`, `remove`, `stat`, `type`, `version`, `exit`). Same-named functions in your own code may therefore trigger a plugin you do not need. Remove the plugin from `src-tauri/` if that happens.
 
 ## Supported plugins
 
-| Feature | Web API you write | Rust crate | Platform |
-|---|---|---|---|
-| Opener | `@tauri-apps/plugin-opener` | `tauri-plugin-opener` | All |
-| Dialog | `showOpenFilePicker` / `showSaveFilePicker` polyfill | `tauri-plugin-dialog` | All *(auto-pulls in Filesystem)* |
-| Filesystem | `@tauri-apps/plugin-fs` | `tauri-plugin-fs` | All |
-| Clipboard | `navigator.clipboard.writeText` / `readText` | `tauri-plugin-clipboard-manager` | All |
-| Notifications | `new Notification(...)` | `tauri-plugin-notification` | All |
-| OS info | `@tauri-apps/plugin-os` | `tauri-plugin-os` | All |
-| Geolocation | `navigator.geolocation.*` | `tauri-plugin-geolocation` | Android, iOS, macOS *(wired if detected, but the permission always fails on Windows/Linux — see [Platform notes](#platform-notes))* |
-| Global shortcut | `registerGlobalShortcut(...)` | `tauri-plugin-global-shortcut` | **Desktop only** |
-| Autostart | `setAutoStart(...)` | `tauri-plugin-autostart` | **Desktop only** |
-| Persistent store | `window.biniStore.*` | `tauri-plugin-store` | All |
-| Camera / microphone | `getUserMedia(...)` | *(none — native webview support)* | All |
-| Bluetooth | `navigator.bluetooth` | *(no first-party plugin exists)* | Unsupported — logged, not wired |
+Every plugin below is also detected by a direct `@tauri-apps/plugin-<name>` import. The "Also detected by" column lists the additional triggers.
 
-"Desktop only" plugins are handled specially, not just wired the same way as everything else: their Cargo dependency is placed under a target-conditional section (`[target."cfg(not(any(target_os = "android", target_os = "ios")))".dependencies]`) rather than plain `[dependencies]`, and their registration is wrapped in `#[cfg(desktop)]` inside `.setup()` rather than chained onto the builder. Their Rust crates genuinely don't expose the relevant APIs when compiled for Android/iOS — chaining them the normal way would fail to compile on mobile builds.
+| Plugin | Also detected by | Platform | Polyfill |
+| --- | --- | --- | --- |
+| `opener` | `openUrl(...)`, `window.open(...)`, `<a target="_blank">` | All | Yes |
+| `dialog` | `showOpenFilePicker(...)`, `showSaveFilePicker(...)` | All | Yes |
+| `fs` | `readTextFile`, `writeTextFile`, `readFile`, `writeFile`, `mkdir`, `remove`, `exists`, `readDir`, `stat`, `copyFile`, `rename` calls | All | No |
+| `clipboard-manager` | `navigator.clipboard.writeText` / `readText` | All | Yes |
+| `notification` | `new Notification(...)`, `Notification.requestPermission` | All | Yes |
+| `os` | `platform`, `version`, `arch`, `type`, `family`, `hostname`, `locale`, `eol` calls | All | No |
+| `geolocation` | `navigator.geolocation` | All | Yes |
+| `http` | `fetch('http(s)://…')` with a literal URL | All | Yes |
+| `store` | `biniStore` | All | Yes |
+| `shell` | `Command.create`, `Command.sidecar` calls | All | No |
+| `process` | `exit`, `relaunch` calls | All | No |
+| `sql` | `Database.load` | All | No |
+| `log`, `upload`, `websocket`, `deep-link` | import only | All | No |
+| `global-shortcut` | `registerGlobalShortcut` | Desktop | Yes |
+| `autostart` | `setAutoStart`, `isAutoStartEnabled` | Desktop | Yes |
+| `cli` | `getMatches` | Desktop | No |
+| `updater`, `window-state`, `positioner` | import only | Desktop | No |
+| `haptics` | `navigator.vibrate` | Mobile | Yes |
+| `biometric`, `barcode-scanner`, `nfc` | import only | Mobile | No |
+
+Each plugin maps to the crate `tauri-plugin-<name>` and the npm package `@tauri-apps/plugin-<name>`.
+
+### Unsupported features
+
+These are detected, logged as a warning with a hint, and not wired, because no first-party Tauri plugin exists.
+
+| Web API | Hint |
+| --- | --- |
+| `navigator.bluetooth` | Look at community BLE plugins (for example `tauri-plugin-blec`). |
+| `navigator.usb` | Use a custom Rust command or a community plugin. |
+| `navigator.serial` | Use a custom Rust command (for example with the `serialport` crate). |
+| `navigator.hid` | Use a custom Rust command or a community plugin. |
+| `navigator.share` | Use a community share-sheet plugin or a custom command. |
+
+## How Rust wiring is done
+
+1. **All-platform plugins** are added one at a time with `cargo tauri add <name>` run inside `src-tauri/`, which handles the crate, registration, and default permissions.
+2. **Desktop-only and mobile-only plugins** are added with `cargo add tauri-plugin-<name>@2 --manifest-path … --target <cfg>`:
+   - desktop: `cfg(not(any(target_os = "android", target_os = "ios")))`
+   - mobile: `cfg(any(target_os = "android", target_os = "ios"))`
+3. **Registration for those plugins** is written into `src/lib.rs` (or `src/main.rs` if there is no `lib.rs`) inside your `.setup(|app| { … })` closure, wrapped in `#[cfg(desktop)]` or `#[cfg(mobile)]`:
+
+   ```rust
+   /* @bini-native:desktop-plugins */
+   #[cfg(desktop)]
+   {
+       app.handle().plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))?;
+   }
+   /* @bini-native:end-desktop-plugins */
+   ```
+
+   If there is no `.setup(...)`, one is inserted before `.run(tauri::generate_context!())`. The marked block is removed and regenerated on every run, so do not hand-edit inside the markers. Plugins you register yourself elsewhere in the file are not inspected, so avoid registering the same plugin twice.
+
+Individual `tauri add` and `cargo add` calls time out after 120 s and 60 s respectively. A failure is logged as a warning and does not stop the dev server.
+
+### Tauri CLI preflight
+
+If any Rust plugin is needed, `bini-native` first checks `cargo tauri --version`. If the Tauri CLI is missing, it runs `cargo install tauri-cli --version ^2 --locked` (10 minute timeout). If that fails, Rust wiring is skipped, a warning is printed, and polyfills are still injected.
+
+## Capabilities
+
+`bini-native` never creates or edits `capabilities/default.json`. For all-platform plugins, permissions come from `cargo tauri add`.
+
+For platform-specific plugins it scaffolds:
+
+| File | Created when | Contents |
+| --- | --- | --- |
+| `capabilities/desktop.json` | Desktop-only plugins were detected and the file does not exist | `core:default` plus the plugins' permissions, for macOS, Windows, and Linux |
+| `capabilities/mobile.json` | Mobile-only plugins were detected and the file does not exist | `core:default` plus the plugins' permissions, for Android and iOS |
+
+The `windows` list is copied from `default.json` (falling back to `["main"]`). Once a file exists it is yours: it is never updated, so add permissions for plugins you detect later by hand. Review and tighten scopes before production.
+
+## Polyfills
+
+The entry file is the first existing file among `src/main.tsx`, `main.jsx`, `main.ts`, `main.js`, `index.tsx`, `index.jsx`, `index.ts`, and `index.js`.
+
+On every dev start, `bini-native` removes its previous block (marker `/* @bini-native:polyfills:v2 */`) and writes a new one after your last single-line `import …;` statement (or at the top of the file if there is none). If no polyfilled feature is detected any more, the block is removed. Do not hand-edit it. With a `tsconfig.json` present, the block includes type annotations and a `declare global { interface Window { … } }` augmentation.
+
+The block dynamically imports the plugin packages and only runs when `__TAURI_INTERNALS__` is on `window`.
+
+| Plugin | Polyfill behaviour |
+| --- | --- |
+| `opener` | Intercepts `window.open` for external `http(s)`, `mailto:`, and `tel:` URLs (new tab, no window features), and clicks on external `<a href>` links (ignores `download` links and links inside buttons, inputs, or `[data-no-opener]`) |
+| `dialog` | Defines `showOpenFilePicker` / `showSaveFilePicker` only if the webview does not already provide them |
+| `clipboard-manager` | Replaces `navigator.clipboard.writeText` / `readText` |
+| `notification` | Replaces `window.Notification`, requesting permission on first use |
+| `geolocation` | Replaces `getCurrentPosition`, `watchPosition`, and `clearWatch`, with a permission check first |
+| `http` | Routes `fetch` through the HTTP plugin for cross-origin `http(s)` URLs that are not localhost |
+| `haptics` | Replaces `navigator.vibrate` on Android and iOS user agents only |
+| `global-shortcut` | Adds `window.registerGlobalShortcut(shortcut, callback)`, `unregisterGlobalShortcut`, and `isGlobalShortcutRegistered` |
+| `autostart` | Adds `window.setAutoStart(enabled)` and `window.isAutoStartEnabled()` |
+| `store` | Adds `window.biniStore` with `get`, `set`, `delete`, and `clear`, backed by `bini-store.json` with auto-save |
+
+Known limitations:
+
+- The dialog polyfill's `getFile()` and `createWritable()` dynamically import `@tauri-apps/plugin-fs`. `bini-native` does not add the filesystem plugin for you, so use or import `fs` somewhere in your source (which wires it) before relying on file reads and writes.
+- `watchPosition` returns `-1` synchronously. The real watch id is assigned asynchronously, so `clearWatch` on the returned value will not stop the watch.
+
+## Package installs
+
+- **Already-installed packages are skipped.** Each package is checked against `<project>/node_modules/<name>/package.json`. Only missing ones are installed. (Packages hoisted to a workspace root are not seen by this check.)
+- **Package manager** is picked from the lock file: `bun.lockb`, `bun.lock`, `pnpm-lock.yaml`, `yarn.lock`, then `package-lock.json`, searched in the project directory and up to four parent workspace directories. With no lock file, `bun`, `pnpm`, `yarn`, and `npm` are probed with `--version` in that order, defaulting to `npm`.
+- **Command:** `<pm> add <packages>` (regular dependencies, not dev dependencies), with a 120 s timeout. A failure prints the exact command to run by hand.
+- **Names are allowlisted** (`^(@scope/)?name`, alphanumerics, `.`, `_`, `-`). Anything else is skipped with a warning.
+- A fresh install prints a restart notice instead of hot-loading the new dependency.
+
+## Manual steps
+
+`bini-native` does not print per-plugin setup notes, so these remain your responsibility:
+
+| Plugin | What you need to do |
+| --- | --- |
+| `http` | Define the allowed URL scopes in your capability file |
+| `sql` | Enable a driver feature (`sqlite`, `mysql`, or `postgres`) for `tauri-plugin-sql` in `Cargo.toml`; none is enabled for you |
+| `updater` | Configure `plugins.updater` (public key and endpoints) and `bundle.createUpdaterArtifacts` in `tauri.conf.json` |
+| `cli` | Define arguments under `plugins.cli` in `tauri.conf.json` |
+| `deep-link` | Register schemes and hosts under `plugins.deep-link` in `tauri.conf.json` |
+| `nfc` | Enable the NFC capability in Xcode for iOS, and add the Android `NFC` permission yourself |
+| `notification`, `geolocation`, `haptics`, `biometric` | Add the Android manifest permissions and iOS/macOS `Info.plist` usage descriptions yourself |
+
+## What it does not do
+
+- It does not write `AndroidManifest.xml` entries or `Info.plist` usage descriptions.
+- It does not detect `getUserMedia`, and it does not configure camera or microphone permissions.
+- It does not wire the filesystem plugin as a dependency of the dialog plugin.
+- It does not modify existing capability files.
+- It does not run during `tauri build`.
 
 ## Platform notes
 
-A couple of things are Tauri/OS limitations, not bugs in this plugin:
-
-- **Notifications on Windows dev builds** — unpackaged `tauri dev` builds have no Start Menu shortcut / AUMID, so Windows silently denies the permission with no prompt at all. Run `tauri build` and install the result to test notifications properly.
-- **Geolocation on Windows/Linux desktop** — Tauri's official geolocation plugin only supports Android, iOS, and macOS. It's still wired automatically if your source uses it (since the same code path may also target mobile), but the permission request will always fail on Windows/Linux desktop.
-- **Autostart and global shortcuts don't exist on mobile** — these two plugins are Tauri desktop-only by design (there's no "launch at startup" or "global keyboard shortcut" concept on Android/iOS). If your source uses them, they're still wired, but only inside a `#[cfg(desktop)]` block and a target-conditional Cargo dependency — so an Android or iOS build compiles cleanly and simply doesn't include that code, rather than failing to compile.
+- **Notifications on Windows dev builds:** unpackaged `tauri dev` builds have no Start Menu shortcut or AUMID, so Windows silently denies the permission. Run `tauri build` and install the result to test notifications properly.
+- **Geolocation on Windows and Linux desktop:** Tauri's official geolocation plugin only supports Android, iOS, and macOS. It is still wired if your source uses it, but the permission request will fail on Windows and Linux.
+- **Desktop-only and mobile-only plugins** are placed behind `#[cfg(...)]` and a target-conditional Cargo dependency, so Android and iOS builds compile without the desktop-only crates (and the reverse).
 
 ## Requirements
 
-- A Tauri v2 project (`src-tauri/` present) — on projects without one, `bini-native` no-ops entirely, so it's safe to include in web-only builds too
-- A `src/main.tsx` / `main.jsx` / `main.ts` / `main.js` entry file, where runtime polyfills get injected
-- Vite 8
-- `tauri dev` run at least once before `tauri build` on a fresh checkout (see [How it works](#how-it-works))
+- A Tauri v2 project with `src-tauri/` for Rust wiring and package installs. Without `src-tauri/`, those steps are skipped, but polyfills for detected features are still injected into the entry file. Those polyfills import `@tauri-apps/plugin-*` packages that would not be auto-installed in that case.
+- An entry file in `src/` (see [Polyfills](#polyfills)).
+- `vite` `^8.0.0` (peer dependency).
+- `bini-router` `>= 2` (peer dependency).
+- `cargo` on your `PATH`.
+- `tauri dev` run at least once before `tauri build` on a fresh checkout.
+
+The package is `"type": "module"` and ships ESM (`dist/index.js`) and CommonJS (`dist/index.cjs`) builds with bundled TypeScript types (`dist/index.d.ts`).
 
 ## CI / production builds
 
-Because wiring is dev-only and persistent, a CI pipeline that only ever runs `tauri build` on a fresh checkout — never `tauri dev` — will build against whatever's already committed in `src-tauri/`, unwired for anything not already there. Two common ways to handle this:
+Because wiring is dev-only and persistent, a pipeline that only runs `tauri build` builds whatever is committed. Two options:
 
-- **Commit `src-tauri/` after wiring locally.** Run `tauri dev` once on your machine, confirm the plugin's edits look right, then commit `Cargo.toml`, `lib.rs`, `capabilities/default.json`, and any manifest/plist changes like any other source file. CI's `tauri build` then just compiles them — no special CI step needed.
-- **Run a short-lived `tauri dev` in CI first**, then kill it once wiring finishes, before invoking `tauri build`. Slower, but useful if you don't want generated Tauri files in version control.
-
-Either way, `bini-native` never runs code during the build step itself — build is always just cargo compiling whatever's on disk.
+- **Commit the wiring.** Run `tauri dev` locally, review the changes, and commit `package.json` and your lock file, `src-tauri/Cargo.toml` and `Cargo.lock`, `src-tauri/src/lib.rs`, the capability files, and the polyfill block in your entry file.
+- **Run a short-lived `tauri dev` in CI first**, then stop it once wiring finishes and run `tauri build`. Slower, but keeps generated files out of version control.
 
 ## Security
 
-`bini-native` runs during `tauri dev` and touches your package manager and your `src-tauri/` files directly, so it's worth being explicit about how it does that:
+`bini-native` runs during `tauri dev` and spawns package-manager and cargo processes, so:
 
-- **No shell string interpolation, and no `shell: true`.** Package installs (`npm add`, `pnpm add`, etc.) go through [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) instead of Node's built-in `child_process` with `shell: true`. This distinction matters: Node's own `shell: true` option does **not** escape an args array — it concatenates the entries into a single string and hands that to the shell to reparse, which is exactly the injection surface a naive `execSync` string would have (this is also why Node emits deprecation warning `DEP0190` when you combine `shell: true` with an args array). `cross-spawn` avoids that entirely by resolving Windows `.cmd`/`.bat` shims and quoting arguments itself, without ever asking a shell to reparse a joined string.
-- **Package manager choice comes from your lock file, not a guess.** `bini-native` reads `bun.lockb`/`bun.lock`/`pnpm-lock.yaml`/`yarn.lock`/`package-lock.json` to pick the install command, only probing `PATH` as a fallback on a lock-file-less fresh project. See [Package installs](#package-installs).
-- **Nothing gets reinstalled that's already there.** Every package is checked against `node_modules/<name>/package.json` before it's ever passed to an `add` command, so re-running `tauri dev` doesn't repeatedly shell out for dependencies you already have.
-- **Package names are allowlisted.** Every package name `bini-native` might install is checked against a strict pattern (`^(@scope/)?name` with only alphanumerics, `.`, `_`, `-`) before it's ever passed to the package manager. Anything that doesn't match is skipped with a warning instead of being installed.
-- **Writes are contained to your project.** Every file `bini-native` patches (`Cargo.toml`, `lib.rs`/`main.rs`, `capabilities/default.json`, `AndroidManifest.xml`, `Info.plist`) is resolved from a fixed `src-tauri/` root via static path joins, with a guard that refuses to write anywhere outside that root.
-- **Build is a strictly smaller attack surface than dev.** Because `tauri build` doesn't run any of the plugin's code, none of the above — subprocess spawning, package installs, file patching — happens as part of a production build at all.
-- **Dependency footprint is intentionally small.** There are two runtime dependencies: [`oxc-parser`](https://www.npmjs.com/package/oxc-parser) (MIT, used for the AST import scan that detects `@tauri-apps/plugin-*` usage) and [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) (MIT, used for the safe cross-platform process spawning described above). `oxc-parser` ships native NAPI bindings per platform, which is why you'll see "native code" flagged by supply-chain scanners — that's expected for a Rust-backed parser and not something a pure-JS package can avoid while staying fast. `cross-spawn` is pure JS with no native code. `vite` is a peer dependency, not bundled. `typescript`, `tsup`, and everything else live in `devDependencies` and are never published — you can confirm this yourself with `npm pack --dry-run` or `pnpm pack --dry-run`, which lists exactly what ships in the tarball.
+- **No shell string interpolation.** Every subprocess goes through [`cross-spawn`](https://www.npmjs.com/package/cross-spawn) with an argument array and never `shell: true`, so no shell re-parses a joined string.
+- **Package manager from your lock file,** with `PATH` probing only as a fallback.
+- **Nothing already installed is reinstalled.**
+- **Package names are allowlisted** before reaching the package manager.
+- **Path guards.** Writes to `src-tauri/src/lib.rs` / `main.rs` and to your entry file go through a check that refuses paths outside their root. `Cargo.toml` is edited by `cargo`, and capability files are only created inside `src-tauri/capabilities/`.
+- **Child processes are cleaned up.** Active async installs are killed on exit, `SIGINT`, and `SIGTERM`.
+- **It can install tooling.** If the Tauri CLI is missing, it runs `cargo install tauri-cli`, as described in [Tauri CLI preflight](#tauri-cli-preflight).
+- **Nothing runs in production builds.** Build never executes the plugin's subprocess, install, or file-writing code.
 
-If your org runs supply-chain scanning as part of CI, point it at the packed tarball rather than the full repo/lockfile where possible — scanning `devDependencies` will surface findings (license, minification, etc.) that never reach anyone who installs `bini-native`.
+- **Small dependency footprint.** The only runtime dependency is `cross-spawn` (pure JavaScript, MIT). `vite` and `bini-router` are peer dependencies. Source parsing happens inside `bini-router`, so `bini-native` has no parser or native bindings of its own. Build tooling (`tsup`, `typescript`, type packages) is in `devDependencies` and is not installed for consumers.
+
+If you run supply-chain scanning in CI, scan the packed tarball (`npm pack --dry-run` lists what ships: `dist`, the README, and the license) rather than the whole repository.
 
 ## FAQ
 
 **Does this touch my code every time I save?**
-No. File watching only triggers a cheap, read-only feature-detection scan (debounced) that logs a restart notice if something new shows up — it never rewrites `src-tauri/` mid-session.
+No. Saving a file only triggers a debounced, read-only detection pass that may log a restart notice. Files are written at dev startup: the polyfill block in your entry file, plus the `src-tauri/` wiring.
 
 **Does `tauri build` re-check or re-wire anything?**
-No — `tauri build` is a complete no-op for `bini-native`. It only ever runs during `tauri dev`. See [How it works](#how-it-works) and [CI / production builds](#ci--production-builds).
+No. See [How it works](#how-it-works) and [CI / production builds](#ci--production-builds).
 
-**Will it try to reinstall packages every time I run `tauri dev`?**
-No. Every package is checked against `node_modules` first, and only genuinely missing ones are installed. See [Package installs](#package-installs).
+**Will it reinstall packages every time I run `tauri dev`?**
+No. Packages already present in `node_modules` are skipped. See [Package installs](#package-installs).
 
 **What if I've already hand-edited `lib.rs`?**
-`bini-native` checks the actual registered `.plugin(...)` call for each crate. If it's already correct, it's left untouched. If it's missing, it's inserted. If it's present but wrong — wrong call form, or a desktop-only plugin chained where it shouldn't be — it's corrected in place rather than left broken.
+`bini-native` only manages the block between its own `@bini-native:*-plugins` markers (desktop-only and mobile-only plugins). All-platform plugins are added by `cargo tauri add`. It does not look for equivalent registrations you wrote yourself, so remove duplicates by hand if a plugin ends up registered twice.
 
-**Does "detected" mean I have to call the Web API directly?**
-No — a direct `import` from the plugin's npm package counts too, not just the polyfilled Web API. So `import { readFile } from '@tauri-apps/plugin-fs'` wires the filesystem plugin even without touching a browser API at all.
+**Does "detected" mean I have to call the web API directly?**
+No. A direct import from the plugin's npm package counts too. For example, `import { readFile } from '@tauri-apps/plugin-fs'` wires the filesystem plugin.
 
 **Can I use this without Bini.js?**
-Yes — it's a plain Vite plugin with no Bini.js-specific dependency. It expects a conventional Vite + Tauri project layout, nothing more.
+It is a Vite plugin, but it relies on `bini-router` (a peer dependency, `>= 2`) for source analysis, so that package must be installed even in a non-Bini.js project. Beyond that it expects a conventional Vite + Tauri layout.
 
 ## Contributing
 
-Issues and PRs welcome. Please include your OS, Tauri version, and (if relevant) the exact web API call that didn't get detected or wired correctly.
+Issues and PRs welcome. Please include your OS, Tauri version, and, if relevant, the exact code that was not detected or wired correctly.
 
 ## License
 
